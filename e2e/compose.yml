@@ -1,0 +1,13 @@
+# A cloud and the whiteboard service for e2e/board.mjs (see run.sh).
+name: rc-whiteboard-e2e
+services:
+  cloud:
+    image: ${CLOUD_IMAGE:-ghcr.io/rustcloud/server:latest}
+    ports:
+      - "127.0.0.1:${PORT:-8091}:8080"
+    volumes:
+      - data:/data
+  whiteboard:
+    image: ${SERVICE_IMAGE:-rc-whiteboard-service:dev}
+volumes:
+  data:

@@ -1,0 +1,181 @@
+name: Build
+
+# The plugin (rc-whiteboard.zip) and the whiteboard service's image, checked
+# together against a real cloud.
+#
+# - every push, pull request and "Run workflow": versions, fmt, clippy and
+#   tests of the plugin and the service, the board's tests (vitest, in the
+#   image build), the plugin archive (artifact rc-whiteboard-<version>, a zip
+#   that installs as it is), the service image, and e2e/ in Chromium against
+#   ghcr.io/rustcloud/server:latest;
+# - a push to main publishes the image as ghcr.io/rustcloud/whiteboard:main;
+#   if manifest.toml's version has no release yet, it publishes release
+#   v<version> (the tag on that commit) with rc-whiteboard.zip and its SHA-256
+#   and the image :<version> and :latest; later pushes of that version leave
+#   them alone, so bump the version to publish again;
+# - a tag v<version> pushed by hand publishes or refreshes that release too.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  IMAGE: ghcr.io/rustcloud/whiteboard
+
+jobs:
+  plugin:
+    name: Plugin
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target wasm32-wasip2
+          rustup default stable
+          rustc --version && cargo --version && node --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            service/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'service/Cargo.lock') }}
+
+      # One version everywhere, and the WIT the manifest says it is built against.
+      - name: Versions
+        id: versions
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' manifest.toml)
+          crate=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          service=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' service/Cargo.toml)
+          board=$(sed -n 's/^  "version": "\(.*\)",/\1/p' frontend/package.json)
+          api=$(sed -n 's/^api = "^\(.*\)"/\1/p' manifest.toml)
+          wit=$(sed -n 's/^package rustcloud:app@\(.*\);/\1/p' wit/app.wit)
+          echo "manifest $version, Cargo.toml $crate, service $service, frontend $board, api ^$api, wit $wit"
+          for other in "$crate" "$service" "$board"; do
+            [ "$version" = "$other" ] || { echo "::error::versions differ: manifest.toml $version ≠ $other"; exit 1; }
+          done
+          [ "$api" = "$wit" ] || { echo "::error::manifest api ^$api ≠ wit/app.wit $wit"; exit 1; }
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              [ "${GITHUB_REF#refs/tags/v}" = "$version" ] || {
+                echo "::error::tag ${GITHUB_REF#refs/tags/} ≠ v$version of manifest.toml"; exit 1; } ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Format
+        run: |
+          cargo fmt -- --check
+          (cd service && cargo fmt -- --check)
+
+      - name: Clippy
+        run: |
+          cargo clippy --release --locked --target wasm32-wasip2 -- -D warnings
+          cargo clippy --locked --all-targets -- -D warnings
+          (cd service && cargo clippy --locked --all-targets -- -D warnings)
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Pages
+        run: for file in ui/*.js e2e/*.mjs; do node --check "$file"; done
+
+      - name: Build
+        run: |
+          cargo build --release --locked --target wasm32-wasip2
+          mkdir -p dist/rc-whiteboard
+          cp manifest.toml dist/rc-whiteboard/
+          cp target/wasm32-wasip2/release/rc_whiteboard.wasm dist/rc-whiteboard/app.wasm
+          (cd dist && zip -qr rc-whiteboard.zip rc-whiteboard && sha256sum rc-whiteboard.zip > rc-whiteboard.zip.sha256)
+          ls -l dist/rc-whiteboard dist/rc-whiteboard.zip
+          cat dist/rc-whiteboard.zip.sha256
+
+      # The artifact downloads as a zip of the folder's files: manifest.toml and
+      # app.wasm at its top make it the plugin archive itself.
+      - name: Keep the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-whiteboard-${{ steps.versions.outputs.version }}
+          path: dist/rc-whiteboard/
+
+  service:
+    name: Service and e2e
+    needs: plugin
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.plugin.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The board's tests (vitest) and the service's (cargo test) run in the build.
+      - name: Image
+        run: docker build -t rc-whiteboard-service:dev .
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rc-whiteboard-${{ env.VERSION }}
+          path: dist/rc-whiteboard
+
+      - name: e2e
+        run: |
+          e2e/test-zip.sh dist/rc-whiteboard dist/rc-whiteboard-e2e.zip
+          e2e/run.sh dist/rc-whiteboard-e2e.zip
+
+      - name: Screenshots and logs of e2e
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ env.VERSION }}
+          path: e2e/out/
+          if-no-files-found: ignore
+
+      - name: Release
+        id: release
+        if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1 && [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "Release $tag exists: nothing to publish (bump the version for a new one)."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          (cd dist && zip -qr rc-whiteboard.zip rc-whiteboard && sha256sum rc-whiteboard.zip > rc-whiteboard.zip.sha256)
+          api=$(sed -n 's/^api = "\(.*\)"/\1/p' manifest.toml)
+          notes="Install rc-whiteboard.zip on Administration → Plugins → Install (RustCloud with plugin API $api) and run the service image $IMAGE:$VERSION next to the cloud — see README."
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --target "$GITHUB_SHA" --title "rc-whiteboard $VERSION" --notes "$notes" --generate-notes
+          gh release upload "$tag" dist/rc-whiteboard.zip dist/rc-whiteboard.zip.sha256 --clobber
+          echo "new=true" >> "$GITHUB_OUTPUT"
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
+
+      - name: Publish the image
+        if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          tags="main"
+          [ "${{ steps.release.outputs.new }}" = true ] && tags="$tags $VERSION latest"
+          for tag in $tags; do
+            docker tag rc-whiteboard-service:dev "$IMAGE:$tag"
+            docker push -q "$IMAGE:$tag"
+            echo "Pushed $IMAGE:$tag"
+          done

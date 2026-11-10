@@ -1,0 +1,8 @@
+{
+  "name": "rc-whiteboard-e2e",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "^1.50.0"
+  }
+}

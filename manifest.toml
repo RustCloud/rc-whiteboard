@@ -1,0 +1,56 @@
+id = "rc-whiteboard"
+version = "0.1.0"
+# The version of wit/app.wit: open_with, tokens, locks and request bodies need
+# 0.2.14, [[proxy]] 0.2.15, [[new_files]] and status 0.2.16, `extensions` of
+# [[open_with]] 0.2.17.
+api = "^0.2.17"
+# A board with pictures in it is larger than the plugin takes at once: the
+# server keeps the body on disk and the plugin saves it with write-request-body.
+large_bodies = true
+# The report on the Status tab of the plugin's dialog (Administration →
+# Plugins → Whiteboard): whether the whiteboard service answers.
+status = "/status"
+
+[name]
+en = "Whiteboard"
+ru = "Доска"
+
+# The plugin opens and saves the one file the user opened, with a token for
+# it; the board itself (Excalidraw) runs in the browser, served by the
+# whiteboard service (a container next to the server, `service_url`).
+# Versions, quota, the activity log and the trash stay the server's.
+[permissions]
+files = "opened"
+files_write = true
+# The service's version for the Status tab.
+network = ["{service_url}"]
+
+# Browsers reach the service only through the server's address: Excalidraw
+# needs an origin of its own (storage, fonts, clipboard), which the sandbox
+# of a plugin page has not.
+[[proxy]]
+target = "{service_url}"
+paths = ["/whiteboard"]
+
+[[server_settings]]
+key = "service_url"
+kind = "text"
+label.en = "Whiteboard service address (inside)"
+label.ru = "Адрес сервиса доски (внутренний)"
+hint.en = "As this server reaches it, e.g. http://whiteboard:8080. Browsers reach it through the cloud's address"
+hint.ru = "Как до него достаёт сервер облака, например http://whiteboard:8080. Браузеры ходят к нему через адрес облака"
+
+# .excalidraw (Excalidraw's own) and .whiteboard (Nextcloud Whiteboard): the
+# same JSON. The server knows neither extension (application/octet-stream).
+[[open_with]]
+mime = ["application/vnd.excalidraw+json"]
+extensions = ["excalidraw", "whiteboard"]
+page = "/edit"
+write = true
+layout = "full"
+label = { en = "Open in Whiteboard", ru = "Открыть в Доске" }
+
+[[new_files]]
+extension = "excalidraw"
+label = { en = "Whiteboard", ru = "Доска" }
+template = "/templates/empty.excalidraw"

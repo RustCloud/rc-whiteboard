@@ -1,0 +1,6 @@
+/target
+/dist
+/service/target
+/frontend/node_modules
+/frontend/dist
+/e2e/node_modules
